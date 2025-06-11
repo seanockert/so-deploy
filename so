@@ -1,0 +1,378 @@
+#!/bin/bash
+
+# Configuration - set these in ~/.config/so/config or as environment variables
+CONFIG_DIR="$HOME/.config/so"
+CONFIG_FILE="$CONFIG_DIR/config"
+
+# Load configuration
+load_config() {
+    if [[ -f "$CONFIG_FILE" ]]; then
+        source "$CONFIG_FILE"
+    fi
+    
+    # Check required variables
+    if [[ -z "$CLOUDFLARE_API_TOKEN" || -z "$CLOUDFLARE_ACCOUNT_ID" || -z "$CLOUDFLARE_ZONE_ID" || -z "$BASE_DOMAIN" ]]; then
+        echo "❌ Missing configuration. Run: so setup"
+        exit 1
+    fi
+}
+
+# Setup configuration
+setup_config() {
+    echo "🚀 Setting up Surge clone for Cloudflare Workers"
+    echo
+    echo "You'll need from your Cloudflare dashboard:"
+    echo "1. API Token (Zone:Edit, Worker:Edit permissions)"
+    echo "2. Account ID"
+    echo "3. Zone ID for your domain"
+    echo "4. Your base domain"
+    echo
+    
+    read -p "Cloudflare API Token: " api_token
+    read -p "Cloudflare Account ID: " account_id
+    read -p "Cloudflare Zone ID: " zone_id
+    read -p "Base domain (e.g., mydomain.com): " base_domain
+    
+    mkdir -p "$CONFIG_DIR"
+    cat > "$CONFIG_FILE" << EOF
+CLOUDFLARE_API_TOKEN="$api_token"
+CLOUDFLARE_ACCOUNT_ID="$account_id"
+CLOUDFLARE_ZONE_ID="$zone_id"
+BASE_DOMAIN="$base_domain"
+WORKER_NAME_PREFIX="site-"
+EOF
+    
+    echo "✅ Configuration saved to $CONFIG_FILE"
+    echo
+    echo "You can now use:"
+    echo "  so                    # Deploy current folder"
+    echo "  so -d mysite          # Deploy with custom subdomain"
+    echo "  so list               # List all deployed sites"
+    echo "  so teardown           # Delete current folder's site"
+}
+
+# Generate files JSON for worker using jq for proper escaping
+generate_files_json() {
+    local dir="$1"
+    local temp_json=$(mktemp)
+    
+    # Start with empty object
+    echo '{}' > "$temp_json"
+    
+    # Find all files recursively
+    while IFS= read -r -d '' file; do
+        # Get relative path
+        local rel_path="${file#$dir/}"
+        
+        # Skip hidden files and common build artifacts
+        [[ "$rel_path" =~ ^\. ]] && continue
+        [[ "$rel_path" =~ node_modules ]] && continue
+        [[ "$rel_path" =~ \.git ]] && continue
+        
+        # Get mime type
+        local mime_type
+        if command -v file >/dev/null 2>&1; then
+            mime_type=$(file --mime-type -b "$file" 2>/dev/null)
+        else
+            case "${file##*.}" in
+                html|htm) mime_type="text/html" ;;
+                css) mime_type="text/css" ;;
+                js) mime_type="application/javascript" ;;
+                json) mime_type="application/json" ;;
+                png) mime_type="image/png" ;;
+                jpg|jpeg) mime_type="image/jpeg" ;;
+                gif) mime_type="image/gif" ;;
+                svg) mime_type="image/svg+xml" ;;
+                ico) mime_type="image/x-icon" ;;
+                woff2) mime_type="font/woff2" ;;
+                woff) mime_type="font/woff" ;;
+                ttf) mime_type="font/ttf" ;;
+                *) mime_type="application/octet-stream" ;;
+            esac
+        fi
+        
+        # Encode file content (universal approach)
+        local content
+        content=$(cat "$file" | base64 | tr -d '\n')
+        
+        # Use jq to properly add the file to the JSON object
+        jq --arg path "$rel_path" \
+           --arg content "$content" \
+           --arg mime "$mime_type" \
+           '.[$path] = {"content": $content, "mimeType": $mime}' \
+           "$temp_json" > "${temp_json}.tmp" && mv "${temp_json}.tmp" "$temp_json"
+        
+        echo "  📄 $rel_path" >&2
+        
+    done < <(find "$dir" -type f -print0)
+    
+    # Output the final JSON and clean up
+    cat "$temp_json"
+    rm -f "$temp_json"
+}
+
+# Generate Cloudflare Worker script
+generate_worker_script() {
+    local files_json="$1"
+    
+    cat << 'EOF'
+const FILES = FILES_PLACEHOLDER;
+
+addEventListener('fetch', event => {
+  event.respondWith(handleRequest(event.request))
+})
+
+async function handleRequest(request) {
+  const url = new URL(request.url);
+  let pathname = url.pathname;
+  
+  // Handle root path
+  if (pathname === '/') {
+    pathname = '/index.html';
+  }
+  
+  // Remove leading slash for lookup
+  const filePath = pathname.startsWith('/') ? pathname.slice(1) : pathname;
+  
+  // Check if file exists
+  if (FILES[filePath]) {
+    const file = FILES[filePath];
+    const content = Uint8Array.from(atob(file.content), c => c.charCodeAt(0));
+    
+    return new Response(content, {
+      headers: {
+        'Content-Type': file.mimeType,
+        'Cache-Control': 'public, max-age=3600',
+        'Access-Control-Allow-Origin': '*'
+      }
+    });
+  }
+  
+  // Try to serve index.html for SPA routing
+  if (FILES['index.html']) {
+    const file = FILES['index.html'];
+    const content = Uint8Array.from(atob(file.content), c => c.charCodeAt(0));
+    
+    return new Response(content, {
+      headers: {
+        'Content-Type': 'text/html',
+        'Cache-Control': 'public, max-age=3600'
+      }
+    });
+  }
+  
+  return new Response('File not found', { status: 404 });
+}
+EOF
+}
+
+# Deploy worker using Cloudflare API
+deploy_worker() {
+    local worker_name="$1"
+    local script="$2"
+    local subdomain="$3"
+    
+    echo "🚀 Deploying worker $worker_name..."
+    
+    # Upload worker script
+    local response
+    response=$(curl -s -X PUT \
+        "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$worker_name" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/javascript" \
+        --data "$script")
+    
+    if ! echo "$response" | jq -e '.success' >/dev/null 2>&1; then
+        echo "❌ Failed to deploy worker:"
+        echo "$response" | jq -r '.errors[]?.message // .error // .'
+        return 1
+    fi
+    
+    # Create route
+    local route_pattern="$subdomain.$BASE_DOMAIN/*"
+    local route_response
+    route_response=$(curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/workers/routes" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data "{\"pattern\":\"$route_pattern\",\"script\":\"$worker_name\"}")
+    
+    if ! echo "$route_response" | jq -e '.success' >/dev/null 2>&1; then
+        echo "⚠️  Worker deployed but route creation may have failed"
+        echo "$route_response" | jq -r '.errors[]?.message // .error // .' >&2
+    fi
+    
+    echo "✅ Worker deployed successfully"
+}
+
+# Ensure DNS record exists
+ensure_dns_record() {
+    local subdomain="$1"
+    local record_name="$subdomain.$BASE_DOMAIN"
+    
+    # Check if record exists
+    local existing
+    existing=$(curl -s -X GET \
+        "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=$record_name" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+    
+    local count
+    count=$(echo "$existing" | jq -r '.result | length')
+    
+    if [[ "$count" == "0" ]]; then
+        echo "🌐 Creating DNS record for $record_name..."
+        
+        curl -s -X POST \
+            "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
+            -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+            -H "Content-Type: application/json" \
+            --data "{\"type\":\"AAAA\",\"name\":\"$record_name\",\"content\":\"100::\",\"proxied\":true}" \
+            >/dev/null
+        
+        echo "✅ DNS record created"
+    fi
+}
+
+# Purge cache
+purge_cache() {
+    echo "🔄 Purging cache..."
+    curl -s -X POST \
+        "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/purge_cache" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
+        -H "Content-Type: application/json" \
+        --data '{"purge_everything":true}' \
+        >/dev/null
+    echo "✅ Cache purged"
+}
+
+# List all sites
+list_sites() {
+    load_config
+    
+    echo "📋 Fetching deployed sites..."
+    
+    local response
+    response=$(curl -s -X GET \
+        "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+    
+    local sites
+    sites=$(echo "$response" | jq -r ".result[] | select(.id | startswith(\"$WORKER_NAME_PREFIX\")) | .id")
+    
+    if [[ -z "$sites" ]]; then
+        echo "No sites deployed yet."
+        return
+    fi
+    
+    echo "🌐 Deployed sites:"
+    while IFS= read -r worker_name; do
+        local subdomain="${worker_name#$WORKER_NAME_PREFIX}"
+        echo "  https://$subdomain.$BASE_DOMAIN"
+    done <<< "$sites"
+}
+
+# Deploy current directory
+deploy() {
+    local subdomain="$1"
+    load_config
+    
+    local current_dir="$(pwd)"
+    local folder_name="$(basename "$current_dir")"
+    
+    # Use folder name if no subdomain specified
+    [[ -z "$subdomain" ]] && subdomain="$folder_name"
+    
+    local worker_name="$WORKER_NAME_PREFIX$subdomain"
+    
+    echo "🚀 Deploying $current_dir to $subdomain.$BASE_DOMAIN..."
+    
+    # Check if directory has files
+    if [[ -z "$(find "$current_dir" -type f -not -path '*/.*' | head -1)" ]]; then
+        echo "❌ No files found in current directory"
+        exit 1
+    fi
+    
+    # Generate files JSON
+    echo "📦 Processing files..."
+    local files_json
+    files_json=$(generate_files_json "$current_dir")
+    
+    # Generate worker script
+    local worker_script
+    worker_script=$(generate_worker_script)
+    worker_script="${worker_script/FILES_PLACEHOLDER/$files_json}"
+    
+    # Debug: Save the generated script to a temp file
+    echo "🔍 Saving generated script to /tmp/worker-debug.js for inspection..."
+    echo "$worker_script" > /tmp/worker-debug.js
+    echo "📝 You can check the generated script with: cat /tmp/worker-debug.js"
+    
+    # Ensure DNS record exists
+    ensure_dns_record "$subdomain"
+    
+    # Deploy worker
+    deploy_worker "$worker_name" "$worker_script" "$subdomain"
+    
+    # Purge cache
+    purge_cache
+    
+    echo
+    echo "🎉 Site deployed successfully!"
+    echo "🌐 URL: https://$subdomain.$BASE_DOMAIN"
+}
+
+# Teardown a site
+teardown() {
+    local subdomain="$1"
+    load_config
+    
+    local folder_name="$(basename "$(pwd)")"
+    [[ -z "$subdomain" ]] && subdomain="$folder_name"
+    
+    local worker_name="$WORKER_NAME_PREFIX$subdomain"
+    
+    echo "🗑️  Deleting site $subdomain.$BASE_DOMAIN..."
+    
+    # Delete worker
+    local response
+    response=$(curl -s -X DELETE \
+        "https://api.cloudflare.com/client/v4/accounts/$CLOUDFLARE_ACCOUNT_ID/workers/scripts/$worker_name" \
+        -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+    
+    if echo "$response" | jq -e '.success' >/dev/null 2>&1; then
+        echo "✅ Site deleted successfully"
+    else
+        echo "❌ Error deleting site:"
+        echo "$response" | jq -r '.errors[]?.message // .error // .'
+    fi
+}
+
+# Main command handling
+case "${1:-}" in
+    setup)
+        setup_config
+        ;;
+    list)
+        list_sites
+        ;;
+    teardown)
+        teardown "$2"
+        ;;
+    -d)
+        deploy "$2"
+        ;;
+    "")
+        deploy
+        ;;
+    *)
+        echo "Usage: so [command] [options]"
+        echo
+        echo "Commands:"
+        echo "  so            Deploy current folder"
+        echo "  so -d <name>  Deploy with custom subdomain"
+        echo "  so list       List all deployed sites"
+        echo "  so teardown   Delete current folder's site"
+        echo "  so teardown <name>  Delete specific site"
+        echo "  so setup      Configure Cloudflare credentials"
+        ;;
+esac
