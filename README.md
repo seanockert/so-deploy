@@ -28,7 +28,7 @@ sudo mv so /usr/local/bin/
 # Give it the right permissions
 chmod +x /usr/local/bin/so
 
-# Install dependencies: curl and jq
+# Install dependencies: curl (probably have already) and jq
 brew install jq curl
 ```
 
@@ -54,7 +54,6 @@ You'll need the following Cloudflare credentials:
 - Zone ID (domain settings -> Copy zone ID)
 - Base domain (eg. mydomain.com)
 
-
 ## Commands
 
 ```bash
@@ -76,3 +75,9 @@ so teardown <name>
 # Configure Cloudflare credential
 so setup
 ```
+
+## Windows support
+
+Not tested on Windows yet but should work fine. Runs via Git Bash. 
+
+Run the `./so setup` command and it will prompt you to install the `jq` dependency.
