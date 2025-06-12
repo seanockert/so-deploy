@@ -151,22 +151,40 @@ generate_files_json() {
         if command -v file >/dev/null 2>&1; then
             mime_type=$(file --mime-type -b "$file" 2>/dev/null)
         else
-            case "${file##*.}" in
-                html|htm) mime_type="text/html" ;;
-                css) mime_type="text/css" ;;
-                js) mime_type="application/javascript" ;;
-                json) mime_type="application/json" ;;
-                png) mime_type="image/png" ;;
-                jpg|jpeg) mime_type="image/jpeg" ;;
-                gif) mime_type="image/gif" ;;
-                svg) mime_type="image/svg+xml" ;;
-                ico) mime_type="image/x-icon" ;;
-                woff2) mime_type="font/woff2" ;;
-                woff) mime_type="font/woff" ;;
-                ttf) mime_type="font/ttf" ;;
-                *) mime_type="application/octet-stream" ;;
-            esac
+            mime_type=""
         fi
+
+        # Fallback mime type detection based on file extension
+        case "${file##*.}" in
+            html|htm) mime_type="text/html" ;;
+            css) mime_type="text/css" ;;
+            js) mime_type="application/javascript" ;;
+            json) mime_type="application/json" ;;
+            png) mime_type="image/png" ;;
+            jpg|jpeg) mime_type="image/jpeg" ;;
+            gif) mime_type="image/gif" ;;
+            svg) mime_type="image/svg+xml" ;;
+            ico) mime_type="image/x-icon" ;;
+            woff2) mime_type="font/woff2" ;;
+            woff) mime_type="font/woff" ;;
+            ttf) mime_type="font/ttf" ;;
+            pdf) mime_type="application/pdf" ;;
+            xml) mime_type="application/xml" ;;
+            txt) mime_type="text/plain" ;;
+            mp3) mime_type="audio/mpeg" ;;
+            mp4) mime_type="video/mp4" ;;
+            webm) mime_type="video/webm" ;;
+            ogg) mime_type="audio/ogg" ;;
+            webp) mime_type="image/webp" ;;
+            avif) mime_type="image/avif" ;;
+            ogg) mime_type="audio/ogg" ;;
+            *)
+                # Use file command result if available, otherwise default
+                if [[ -z "$mime_type" ]]; then
+                    mime_type="application/octet-stream"
+                fi
+                ;;
+        esac
 
         # Encode file content (universal approach)
         local content
@@ -225,8 +243,8 @@ async function handleRequest(request) {
     });
   }
 
-  // Try to serve index.html for SPA routing
-  if (FILES['index.html']) {
+  // Try to serve index.html for SPA routing ONLY for HTML requests (not assets)
+  if (FILES['index.html'] && !filePath.includes('.')) {
     const file = FILES['index.html'];
     const content = Uint8Array.from(atob(file.content), c => c.charCodeAt(0));
 
@@ -238,7 +256,7 @@ async function handleRequest(request) {
     });
   }
 
-  return new Response('File not found', { status: 404 });
+  return new Response('File not found: ' + filePath, { status: 404 });
 }
 EOF
 }
