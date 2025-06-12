@@ -4,6 +4,30 @@
 CONFIG_DIR="$HOME/.config/so"
 CONFIG_FILE="$CONFIG_DIR/config"
 
+# Extract subdomain from various formats
+normalize_subdomain() {
+    local input="$1"
+    local subdomain
+    
+    # Remove https:// or http:// prefix
+    input="${input#https://}"
+    input="${input#http://}"
+    
+    # Remove trailing slash
+    input="${input%/}"
+    
+    # Check if it contains the base domain
+    if [[ "$input" == *".$BASE_DOMAIN"* ]]; then
+        # Extract subdomain part (everything before .BASE_DOMAIN)
+        subdomain="${input%%.$BASE_DOMAIN*}"
+    else
+        # Assume it's already just the subdomain
+        subdomain="$input"
+    fi
+    
+    echo "$subdomain"
+}
+
 # Load configuration
 load_config() {
     if [[ -f "$CONFIG_FILE" ]]; then
@@ -190,6 +214,8 @@ deploy_worker() {
     
     # Create route
     local route_pattern="$subdomain.$BASE_DOMAIN/*"
+    echo "🛣️  Creating route: $route_pattern"
+    
     local route_response
     route_response=$(curl -s -X POST \
         "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/workers/routes" \
@@ -197,8 +223,12 @@ deploy_worker() {
         -H "Content-Type: application/json" \
         --data "{\"pattern\":\"$route_pattern\",\"script\":\"$worker_name\"}")
     
-    if ! echo "$route_response" | jq -e '.success' >/dev/null 2>&1; then
-        echo "⚠️  Worker deployed but route creation may have failed"
+    echo "📋 Route response: $route_response"
+    
+    if echo "$route_response" | jq -e '.success' >/dev/null 2>&1; then
+        echo "✅ Route created successfully"
+    else
+        echo "⚠️  Route creation may have failed"
         echo "$route_response" | jq -r '.errors[]?.message // .error // .' >&2
     fi
     
@@ -210,11 +240,15 @@ ensure_dns_record() {
     local subdomain="$1"
     local record_name="$subdomain.$BASE_DOMAIN"
     
+    echo "🔍 Checking DNS record for $record_name..."
+    
     # Check if record exists
     local existing
     existing=$(curl -s -X GET \
         "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=$record_name" \
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
+    
+    echo "📋 DNS check response: $existing"
     
     local count
     count=$(echo "$existing" | jq -r '.result | length')
@@ -222,14 +256,23 @@ ensure_dns_record() {
     if [[ "$count" == "0" ]]; then
         echo "🌐 Creating DNS record for $record_name..."
         
-        curl -s -X POST \
+        local create_response
+        create_response=$(curl -s -X POST \
             "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records" \
             -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN" \
             -H "Content-Type: application/json" \
-            --data "{\"type\":\"AAAA\",\"name\":\"$record_name\",\"content\":\"100::\",\"proxied\":true}" \
-            >/dev/null
+            --data "{\"type\":\"AAAA\",\"name\":\"$record_name\",\"content\":\"100::\",\"proxied\":true}")
         
-        echo "✅ DNS record created"
+        echo "📋 DNS creation response: $create_response"
+        
+        if echo "$create_response" | jq -e '.success' >/dev/null 2>&1; then
+            echo "✅ DNS record created successfully"
+        else
+            echo "❌ DNS record creation failed"
+            echo "$create_response" | jq -r '.errors[]?.message // .error // .'
+        fi
+    else
+        echo "✅ DNS record already exists"
     fi
 }
 
@@ -273,14 +316,19 @@ list_sites() {
 
 # Deploy current directory
 deploy() {
-    local subdomain="$1"
+    local subdomain_input="$1"
     load_config
     
     local current_dir="$(pwd)"
     local folder_name="$(basename "$current_dir")"
     
-    # Use folder name if no subdomain specified
-    [[ -z "$subdomain" ]] && subdomain="$folder_name"
+    # Use folder name if no subdomain specified, otherwise normalize the input
+    local subdomain
+    if [[ -z "$subdomain_input" ]]; then
+        subdomain="$folder_name"
+    else
+        subdomain=$(normalize_subdomain "$subdomain_input")
+    fi
     
     local worker_name="$WORKER_NAME_PREFIX$subdomain"
     
@@ -323,11 +371,18 @@ deploy() {
 
 # Teardown a site
 teardown() {
-    local subdomain="$1"
+    local subdomain_input="$1"
     load_config
     
-    local folder_name="$(basename "$(pwd)")"
-    [[ -z "$subdomain" ]] && subdomain="$folder_name"
+    local subdomain
+    if [[ -z "$subdomain_input" ]]; then
+        # Use current folder name if no subdomain specified
+        local folder_name="$(basename "$(pwd)")"
+        subdomain="$folder_name"
+    else
+        # Normalize the input to extract subdomain
+        subdomain=$(normalize_subdomain "$subdomain_input")
+    fi
     
     local worker_name="$WORKER_NAME_PREFIX$subdomain"
     
