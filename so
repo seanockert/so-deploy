@@ -4,7 +4,7 @@
 CONFIG_DIR="$HOME/.config/so"
 CONFIG_FILE="$CONFIG_DIR/config"
 
-# Extract subdomain from various formats 
+# Extract subdomain from various formats
 normalize_subdomain() {
     local input="$1"
     local subdomain
@@ -249,7 +249,7 @@ deploy_worker() {
     local script="$2"
     local subdomain="$3"
 
-    echo "🚀 Deploying worker $worker_name..."
+    echo "🚀 Deploying worker..."
 
     # Upload worker script
     local response
@@ -262,13 +262,11 @@ deploy_worker() {
     if ! echo "$response" | jq -e '.success' >/dev/null 2>&1; then
         echo "❌ Failed to deploy worker:"
         echo "$response" | jq -r '.errors[]?.message // .error // .'
-        return 1
+        exit 1
     fi
 
-    # Create route
+    # Create route (ignore if it already exists)
     local route_pattern="$subdomain.$BASE_DOMAIN/*"
-    echo "🛣️  Creating route: $route_pattern"
-
     local route_response
     route_response=$(curl -s -X POST \
         "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/workers/routes" \
@@ -276,16 +274,18 @@ deploy_worker() {
         -H "Content-Type: application/json" \
         --data "{\"pattern\":\"$route_pattern\",\"script\":\"$worker_name\"}")
 
-    echo "📋 Route response: $route_response"
+    # Only report route errors that aren't "already exists"
+    if ! echo "$route_response" | jq -e '.success' >/dev/null 2>&1; then
+        local error_message
+        error_message=$(echo "$route_response" | jq -r '.errors[]?.message // .error // .')
 
-    if echo "$route_response" | jq -e '.success' >/dev/null 2>&1; then
-        echo "✅ Route created successfully"
-    else
-        echo "⚠️  Route creation may have failed"
-        echo "$route_response" | jq -r '.errors[]?.message // .error // .' >&2
+        # Ignore "route already exists" errors
+        if [[ "$error_message" != *"route with the same pattern already exists"* ]]; then
+            echo "❌ Route creation failed:"
+            echo "$error_message"
+            exit 1
+        fi
     fi
-
-    echo "✅ Worker deployed successfully"
 }
 
 # Ensure DNS record exists
@@ -293,21 +293,17 @@ ensure_dns_record() {
     local subdomain="$1"
     local record_name="$subdomain.$BASE_DOMAIN"
 
-    echo "🔍 Checking DNS record for $record_name..."
-
     # Check if record exists
     local existing
     existing=$(curl -s -X GET \
         "https://api.cloudflare.com/client/v4/zones/$CLOUDFLARE_ZONE_ID/dns_records?name=$record_name" \
         -H "Authorization: Bearer $CLOUDFLARE_API_TOKEN")
 
-    echo "📋 DNS check response: $existing"
-
     local count
     count=$(echo "$existing" | jq -r '.result | length')
 
     if [[ "$count" == "0" ]]; then
-        echo "🌐 Creating DNS record for $record_name..."
+        echo "🌐 Creating DNS record..."
 
         local create_response
         create_response=$(curl -s -X POST \
@@ -316,16 +312,11 @@ ensure_dns_record() {
             -H "Content-Type: application/json" \
             --data "{\"type\":\"AAAA\",\"name\":\"$record_name\",\"content\":\"100::\",\"proxied\":true}")
 
-        echo "📋 DNS creation response: $create_response"
-
-        if echo "$create_response" | jq -e '.success' >/dev/null 2>&1; then
-            echo "✅ DNS record created successfully"
-        else
+        if ! echo "$create_response" | jq -e '.success' >/dev/null 2>&1; then
             echo "❌ DNS record creation failed"
             echo "$create_response" | jq -r '.errors[]?.message // .error // .'
+            exit 1
         fi
-    else
-        echo "✅ DNS record already exists"
     fi
 }
 
@@ -338,7 +329,6 @@ purge_cache() {
         -H "Content-Type: application/json" \
         --data '{"purge_everything":true}' \
         >/dev/null
-    echo "✅ Cache purged"
 }
 
 # List all sites
@@ -387,7 +377,7 @@ deploy() {
 
     local worker_name="$WORKER_NAME_PREFIX$subdomain"
 
-    echo "🚀 Deploying $current_dir to $subdomain.$BASE_DOMAIN..."
+    echo "🚀 Deploying to $subdomain.$BASE_DOMAIN..."
 
     # Check if directory has files
     if [[ -z "$(find "$current_dir" -type f -not -path '*/.*' | head -1)" ]]; then
@@ -396,7 +386,6 @@ deploy() {
     fi
 
     # Generate files JSON
-    echo "📦 Processing files..."
     local files_json
     files_json=$(generate_files_json "$current_dir")
 
@@ -404,11 +393,6 @@ deploy() {
     local worker_script
     worker_script=$(generate_worker_script)
     worker_script="${worker_script/FILES_PLACEHOLDER/$files_json}"
-
-    # Debug: Save the generated script to a temp file
-    echo "🔍 Saving generated script to /tmp/worker-debug.js for inspection..."
-    echo "$worker_script" > /tmp/worker-debug.js
-    echo "📝 You can check the generated script with: cat /tmp/worker-debug.js"
 
     # Ensure DNS record exists
     ensure_dns_record "$subdomain"
@@ -419,9 +403,7 @@ deploy() {
     # Purge cache
     purge_cache
 
-    echo
-    echo "🎉 Site deployed successfully!"
-    echo "🌐 URL: https://$subdomain.$BASE_DOMAIN"
+    echo "✅ Deployed to https://$subdomain.$BASE_DOMAIN"
 }
 
 # Teardown a site
