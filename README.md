@@ -7,6 +7,12 @@ cd my-app
 so
 ```
 
+
+
+https://github.com/user-attachments/assets/48854b54-34c3-4ec9-ae71-be4836a20340
+
+
+
 ## What and why
 
 I use [surge.sh](https://surge.sh/) to quickly deploy web projects for sharing and testing. SO Deploy does the same but using your own domain.
