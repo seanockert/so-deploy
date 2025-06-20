@@ -1,6 +1,6 @@
 # SO Deploy
 
-Instantly deploy a website to your Cloudflare domain with one command:
+Deploy a website from a local folder to your Cloudflare domain with one command:
 
 ```bash
 cd my-app
@@ -8,18 +8,15 @@ so
 ```
 
 
-
-https://github.com/user-attachments/assets/48854b54-34c3-4ec9-ae71-be4836a20340
-
-
+https://github.com/user-attachments/assets/1e21ebe5-2950-44b6-9d9e-a53942310716
 
 ## What and why
 
-I use [surge.sh](https://surge.sh/) to quickly deploy web projects for sharing and testing. SO Deploy does the same but using your own domain.
+I use [surge.sh](https://surge.sh/) to quickly deploy web projects for sharing and testing. SO Deploy does the same but using your own domain. I made it to scratch my own itch.
 
-When you run the `so` command in a folder, it creates a new public subdomain (eg. `https://my-folder.my-domain.com`) and deploys the contents of that folder to it within seconds.
+When you run the `so` command in a local folder, it creates a new public subdomain (eg. `https://my-folder.my-domain.com`) and deploys the contents of that folder to it within seconds.
 
-To remove this site, simply run `so teardown`
+To remove the site and subdomain, simply run `so teardown`
 
 ## Requirements
 
@@ -55,12 +52,12 @@ so setup
 
 You'll need the following Cloudflare credentials:
 
-- The API token you just created
-- Account ID (account home settings -> Copy account ID)
-- Zone ID (domain settings -> Copy zone ID)
-- Base domain (eg. mydomain.com)
+1. The API token you just created
+2. Account ID (account home settings -> Copy account ID)
+3. Zone ID (domain settings -> Copy zone ID)
+4. Base domain (eg. mydomain.com)
 
-## Commands
+## Available commands
 
 ```bash
 # Deploy current folder
@@ -84,6 +81,6 @@ so setup
 
 ## Windows support
 
-Not tested on Windows yet but should work fine. Runs via Git Bash. 
+Not tested on Windows yet but it should work fine. Runs via Git Bash. 
 
-Run the `./so setup` command and it will prompt you to install the `jq` dependency.
+When you run the `./so setup` command it will prompt you to install the `jq` dependency.
